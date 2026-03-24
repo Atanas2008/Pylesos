@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: azheimer-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: azheimer
+      POSTGRES_USER: azheimer
+      POSTGRES_PASSWORD: azheimer
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U azheimer -d azheimer"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
