@@ -1,0 +1,656 @@
+================================================================================
+  ALZHEIMER TRACKER — BACKEND ARCHITECTURE & USAGE GUIDE
+================================================================================
+
+TABLE OF CONTENTS
+-----------------
+1.  System Overview
+2.  Architecture Diagram
+3.  Component Descriptions
+4.  Project Structure
+5.  Database Schema
+6.  REST API Reference
+7.  Authentication
+8.  Geofencing Logic
+9.  Alert System
+10. Flyway Migrations
+11. Environment Setup (Local)
+12. Running the Application
+13. Testing the API (curl examples)
+14. Swagger UI
+15. Notification Service (Stub)
+16. Configuration Reference
+17. Known Limitations & TODOs
+
+
+================================================================================
+1. SYSTEM OVERVIEW
+================================================================================
+
+The Alzheimer Tracker is a backend system that:
+
+  - Receives real-time GPS pings from a wearable bracelet (ESP32 + SIM module)
+  - Receives medication dose events from a smart medication box (ESP8266/ESP32)
+  - Persists all data in a PostgreSQL database
+  - Automatically raises alerts when a patient leaves their safe zone or misses a dose
+  - Notifies caregivers via push notification, SMS, or email (stub — ready to integrate)
+  - Exposes a REST API consumed by a Flutter mobile app
+
+The database is NEVER exposed directly to any device or client.
+All communication goes through the REST API.
+
+
+================================================================================
+2. ARCHITECTURE DIAGRAM
+================================================================================
+
+  Hardware layer           Transport           Backend layer
+  ─────────────────        ─────────────       ──────────────────────────────────
+  GPS bracelet             SIM / GPRS    ──┐
+  (ESP32 + SIM)                            ├──►  REST API (Spring Boot :8080)
+                                           │           │
+  Medication box           WiFi / HTTPS ──┘           ├──► PostgreSQL (port 5432)
+  (ESP8266/ESP32 + WiFi)                              │
+                                                       ├──► Alert Service
+  Mobile app               HTTPS / REST ─────────────►│         │
+  (Flutter)                                            │         ├──► FCM (push)
+                                                       │         ├──► Twilio (SMS)
+                                                       │         └──► SendGrid (email)
+                                                       │
+                                                  Flyway
+                                             (schema migrations)
+
+
+================================================================================
+3. COMPONENT DESCRIPTIONS
+================================================================================
+
+AzhelmerApplication.java
+  Entry point. Starts the Spring Boot application.
+
+--- Controllers (com.azheimer.controller) ---
+
+  LocationController       Handles POST /location and GET /location/{patientId}
+  MedicationController     Handles POST /medication and GET /medication/{patientId}
+  AlertController          Handles POST /alerts and GET /alerts/{patientId}
+  GlobalExceptionHandler   @RestControllerAdvice — catches validation errors and
+                           unexpected exceptions; always returns HTTP 200 with
+                           success=false and an error message in the body.
+
+--- DTOs (com.azheimer.dto) ---
+
+  ApiResponse<T>           Universal response wrapper:
+                             { "success": true/false, "message": "...", "data": ... }
+                           ALL endpoints return HTTP 200; errors go in the body.
+
+  LocationRequest          GPS ping payload from the bracelet.
+  LocationResponse         Serialized location history entry.
+  MedicationEventRequest   Dose event payload from the medication box.
+  MedicationEventResponse  Serialized medication event entry.
+  AlertRequest             Manual alert trigger (from mobile app or internal use).
+  AlertResponse            Serialized alert entry.
+
+--- Entities (com.azheimer.entity) ---
+
+  Patient          Core patient record (name, home coords, safe zone radius,
+                   emergency contact).
+  Caregiver        Caregiver account (email, phone, FCM token). Many-to-many
+                   relationship with patients.
+  Device           Registered ESP device (device ID, API key, type, patient link,
+                   last heartbeat, battery level).
+  LocationHistory  Individual GPS ping (lat, lng, accuracy, timestamp).
+  MedicationSchedule  Planned dose (drug name, compartment, scheduled time).
+  MedicationEvent  Recorded dose event (OPENED / DOSE_TAKEN / DOSE_MISSED /
+                   LOW_BATTERY).
+  Alert            Raised alert (type, severity, message, resolved flag).
+
+  Enums:
+    DeviceType          BRACELET, MEDBOX
+    MedicationEventType OPENED, DOSE_TAKEN, DOSE_MISSED, LOW_BATTERY
+    AlertType           GEOFENCE_BREACH, MISSED_MEDICATION, LOW_BATTERY,
+                        DEVICE_OFFLINE, ABNORMAL_VITALS
+    AlertSeverity       LOW, MEDIUM, HIGH, CRITICAL
+
+--- Repositories (com.azheimer.repository) ---
+
+  Spring Data JPA repositories. Each provides standard CRUD plus domain-specific
+  derived queries (e.g. findByPatient_IdOrderByTimestampDesc).
+
+--- Services (com.azheimer.service) ---
+
+  LocationService    Saves GPS pings, runs geofence check (Haversine formula),
+                     triggers GEOFENCE_BREACH alert if patient is outside safe zone.
+  MedicationService  Saves dose events, triggers MISSED_MEDICATION or LOW_BATTERY
+                     alerts when appropriate.
+  AlertService       Creates and persists alerts, dispatches notifications to all
+                     caregivers linked to the patient.
+  NotificationService  Stub implementation. Logs notification intent; replace with
+                     real Firebase FCM / Twilio / SendGrid calls.
+
+--- Filter (com.azheimer.filter) ---
+
+  DeviceAuthFilter   OncePerRequestFilter that intercepts POST /location and
+                     POST /medication, validates the X-Device-Key header against
+                     the devices table, and updates last_heartbeat on success.
+
+
+================================================================================
+4. PROJECT STRUCTURE
+================================================================================
+
+  Azheimer/
+  ├── pom.xml                          Maven build descriptor
+  ├── docker-compose.yml               Local PostgreSQL (postgis image)
+  ├── ARCHITECTURE_AND_USAGE.txt       This file
+  └── src/
+      └── main/
+          ├── java/com/azheimer/
+          │   ├── AzhelmerApplication.java
+          │   ├── controller/
+          │   │   ├── AlertController.java
+          │   │   ├── GlobalExceptionHandler.java
+          │   │   ├── LocationController.java
+          │   │   └── MedicationController.java
+          │   ├── dto/
+          │   │   ├── ApiResponse.java
+          │   │   ├── AlertRequest.java        AlertResponse.java
+          │   │   ├── LocationRequest.java     LocationResponse.java
+          │   │   └── MedicationEventRequest.java  MedicationEventResponse.java
+          │   ├── entity/
+          │   │   ├── Alert.java               AlertSeverity.java  AlertType.java
+          │   │   ├── Caregiver.java           Device.java         DeviceType.java
+          │   │   ├── LocationHistory.java
+          │   │   ├── MedicationEvent.java     MedicationEventType.java
+          │   │   ├── MedicationSchedule.java
+          │   │   └── Patient.java
+          │   ├── filter/
+          │   │   └── DeviceAuthFilter.java
+          │   ├── repository/
+          │   │   ├── AlertRepository.java     CaregiverRepository.java
+          │   │   ├── DeviceRepository.java    LocationHistoryRepository.java
+          │   │   ├── MedicationEventRepository.java
+          │   │   ├── MedicationScheduleRepository.java
+          │   │   └── PatientRepository.java
+          │   └── service/
+          │       ├── AlertService.java        LocationService.java
+          │       ├── MedicationService.java   NotificationService.java
+          └── resources/
+              ├── application.properties
+              └── db/migration/
+                  ├── V1__init_schema.sql      Full schema (all 7 tables + indexes)
+                  └── V2__seed_dev_data.sql    Dev seed (1 patient, 2 devices)
+
+
+================================================================================
+5. DATABASE SCHEMA
+================================================================================
+
+  patients
+    id, name, birth_date, home_lat, home_lng,
+    safe_zone_radius_meters (default 200), emergency_contact_name,
+    emergency_contact_phone, created_at
+
+  caregivers
+    id, name, email (unique), phone, fcm_token, created_at
+
+  patient_caregivers  (join table — many-to-many)
+    patient_id, caregiver_id
+
+  devices
+    id, device_id (unique), device_type (BRACELET|MEDBOX),
+    api_key (unique), patient_id (FK), last_heartbeat,
+    battery_level (0-100), active, created_at
+
+  location_history
+    id, patient_id (FK), device_id, lat, lng, accuracy, timestamp, created_at
+    INDEX: (patient_id, timestamp DESC)
+
+  medication_schedules
+    id, patient_id (FK), drug_name, compartment, scheduled_time, active, created_at
+    PARTIAL INDEX: (patient_id) WHERE active = TRUE
+
+  medication_events
+    id, patient_id (FK), device_id, compartment, event_type, timestamp, created_at
+    INDEX: (patient_id, timestamp DESC)
+
+  alerts
+    id, patient_id (FK), alert_type, severity, message, resolved (default FALSE),
+    resolved_at, timestamp, created_at
+    INDEX: (patient_id, timestamp DESC)
+    PARTIAL INDEX: (patient_id) WHERE resolved = FALSE
+
+Note: The schema is managed exclusively by Flyway.
+      spring.jpa.hibernate.ddl-auto=validate — Hibernate only validates,
+      never creates or alters tables.
+
+
+================================================================================
+6. REST API REFERENCE
+================================================================================
+
+All responses follow this envelope:
+  {
+    "success": true | false,
+    "message": "human-readable status",
+    "data": <payload or null>
+  }
+HTTP status is always 200. Check "success" in the body for errors.
+
+--------------------------------------------------------------------------------
+POST /location
+  Purpose : GPS ping from bracelet
+  Auth    : X-Device-Key header required
+  Body    :
+    {
+      "deviceId"  : "bracelet-001",
+      "lat"       : 42.6977,
+      "lng"       : 23.3219,
+      "timestamp" : "2026-03-25T10:30:00Z",
+      "accuracy"  : 5.2
+    }
+  Response data: LocationResponse
+    { "id", "patientId", "deviceId", "lat", "lng", "accuracy", "timestamp" }
+  Side effects:
+    - Saves to location_history
+    - Runs Haversine geofence check; creates GEOFENCE_BREACH alert if outside
+      safe zone and notifies caregivers
+
+--------------------------------------------------------------------------------
+GET /location/{patientId}?limit=50
+  Purpose : Location history for a patient, newest first
+  Auth    : None (mobile app)
+  Response data: [ LocationResponse, ... ]
+
+--------------------------------------------------------------------------------
+POST /medication
+  Purpose : Dose event from medication box
+  Auth    : X-Device-Key header required
+  Body    :
+    {
+      "deviceId"   : "medbox-001",
+      "compartment": 2,
+      "event"      : "OPENED",          (OPENED|DOSE_TAKEN|DOSE_MISSED|LOW_BATTERY)
+      "timestamp"  : "2026-03-25T08:00:05Z"
+    }
+  Response data: MedicationEventResponse
+    { "id", "patientId", "deviceId", "compartment", "eventType", "timestamp" }
+  Side effects:
+    - Saves to medication_events
+    - DOSE_MISSED  → creates MISSED_MEDICATION alert
+    - LOW_BATTERY  → creates LOW_BATTERY alert
+
+--------------------------------------------------------------------------------
+GET /medication/{patientId}?limit=50
+  Purpose : Medication event history for a patient, newest first
+  Auth    : None (mobile app)
+  Response data: [ MedicationEventResponse, ... ]
+
+--------------------------------------------------------------------------------
+POST /alerts
+  Purpose : Manually trigger an alert (mobile app or internal service)
+  Auth    : None
+  Body    :
+    {
+      "patientId" : 1,
+      "alertType" : "GEOFENCE_BREACH",  (see AlertType enum)
+      "severity"  : "HIGH",             (LOW|MEDIUM|HIGH|CRITICAL)
+      "message"   : "Patient seen near bus station",
+      "timestamp" : "2026-03-25T11:00:00Z"
+    }
+  Response data: AlertResponse
+    { "id", "patientId", "alertType", "severity", "message",
+      "resolved", "resolvedAt", "timestamp" }
+  Side effects:
+    - Saves to alerts
+    - Notifies all caregivers linked to the patient
+
+--------------------------------------------------------------------------------
+GET /alerts/{patientId}?limit=50
+  Purpose : Alert history for a patient, newest first
+  Auth    : None (mobile app)
+  Response data: [ AlertResponse, ... ]
+
+
+================================================================================
+7. AUTHENTICATION
+================================================================================
+
+Hardware devices (bracelet, medication box) authenticate using a pre-shared
+API key stored in device flash memory.
+
+  Header: X-Device-Key: <api_key>
+
+The DeviceAuthFilter intercepts POST /location and POST /medication:
+  1. Reads the X-Device-Key header.
+  2. Looks up the key in the devices table.
+  3. Returns HTTP 401 with JSON error body if missing, invalid, or inactive.
+  4. Updates last_heartbeat on the device record if valid.
+  5. Passes the request to the controller.
+
+Dev seed API keys (from V2__seed_dev_data.sql):
+  bracelet-001 → dev-key-bracelet-001-secret
+  medbox-001   → dev-key-medbox-001-secret
+
+GET endpoints have no authentication in the current implementation.
+In production, add JWT/OAuth2 for the mobile app.
+
+
+================================================================================
+8. GEOFENCING LOGIC
+================================================================================
+
+After every GPS ping, LocationService checks whether the patient is outside
+their safe zone using the Haversine great-circle formula:
+
+  distance = 2 * R * atan2( sqrt(a), sqrt(1-a) )
+  where a = sin²(Δlat/2) + cos(lat1)*cos(lat2)*sin²(Δlng/2)
+  and R = 6,371,000 metres (Earth radius)
+
+If distance > patient.safeZoneRadiusMeters:
+  → AlertType.GEOFENCE_BREACH, severity HIGH is created
+  → All caregivers of the patient are notified
+
+The patient's home location (home_lat, home_lng) and radius are stored in
+the patients table and configurable per patient.
+
+Note: When a PostGIS-enabled database is available, you can replace the
+Haversine Java implementation with a native ST_DWithin query for better
+accuracy at scale. The LocationHistoryRepository is ready to accept such a
+query.
+
+
+================================================================================
+9. ALERT SYSTEM
+================================================================================
+
+Alerts are created automatically by the backend or manually via POST /alerts.
+
+Automatic triggers:
+  GEOFENCE_BREACH    → patient ping is outside safe zone radius
+  MISSED_MEDICATION  → medication box sends DOSE_MISSED event
+  LOW_BATTERY        → medication box sends LOW_BATTERY event
+
+Alert flow:
+  1. AlertService.createXxxAlert() builds an Alert entity and saves it.
+  2. AlertService.dispatchNotifications() fetches all caregivers for the patient.
+  3. NotificationService.notify() is called for each caregiver.
+  4. Currently logs to console. Replace with real integrations (see section 15).
+
+Alert severities:
+  LOW       → LOW_BATTERY, informational
+  MEDIUM    → MISSED_MEDICATION
+  HIGH      → GEOFENCE_BREACH
+  CRITICAL  → (reserved for ABNORMAL_VITALS or custom triggers)
+
+
+================================================================================
+10. FLYWAY MIGRATIONS
+================================================================================
+
+Migrations live in: src/main/resources/db/migration/
+
+  V1__init_schema.sql
+    Creates all 7 tables and their indexes. Run once on an empty database.
+    No PostGIS dependency (plain postgres:18 compatible).
+
+  V2__seed_dev_data.sql
+    Inserts one patient (Ivan Petrov, Sofia, Bulgaria), one caregiver,
+    two devices with dev API keys, and two medication schedules.
+    Intended for local development only.
+
+Flyway runs automatically on every application startup.
+If a migration was already applied (checksum in flyway_schema_history matches),
+it is skipped. If the checksum changes, Flyway aborts startup — do NOT edit
+applied migration files; create a new Vx__ file instead.
+
+Important: spring.jpa.hibernate.ddl-auto=validate
+  Hibernate validates the entity model against the schema AFTER Flyway runs.
+  If the schema is missing or mismatched, startup fails with a clear error.
+  On first run against an empty DB this is fine — Flyway creates the schema first.
+
+
+================================================================================
+11. ENVIRONMENT SETUP (LOCAL)
+================================================================================
+
+Prerequisites:
+  - Java 21 (or 25) JDK
+  - Maven 3.9+
+  - Docker Desktop (for the database)
+  - IntelliJ IDEA (recommended)
+
+Step 1 — Start PostgreSQL in Docker:
+  The existing container "alzheimerpostgres" (postgres:18) is used.
+  Start it with Docker Desktop or:
+
+    docker start alzheimerpostgres
+
+  Connection details:
+    Host     : localhost
+    Port     : 5432
+    Database : alzheimer_db
+    User     : postgres
+    Password : 12345
+
+  If you want a PostGIS-enabled container instead, use:
+    docker compose up -d
+  (uses postgis/postgis:16-3.4, database "azheimer", user/password "azheimer")
+  Then update application.properties accordingly (see section 16).
+
+Step 2 — Verify application.properties:
+  Make sure these match your running container:
+    spring.datasource.url=jdbc:postgresql://localhost:5432/alzheimer_db
+    spring.datasource.username=postgres
+    spring.datasource.password=12345
+
+Step 3 — Build:
+    mvn clean install -DskipTests
+
+Step 4 — Run (see section 12).
+
+
+================================================================================
+12. RUNNING THE APPLICATION
+================================================================================
+
+From the command line:
+    mvn spring-boot:run
+
+From IntelliJ IDEA:
+    Run → AzhelmerApplication (the @SpringBootApplication class)
+
+Expected startup output (key lines):
+    Flyway: Successfully applied 2 migrations to schema "public"
+    HHH000490: Using JPA persistence provider...
+    Tomcat started on port 8080
+
+If you see:
+  "HikariPool: Connection is not available" → database is not running
+  "Flyway: Validate failed"                 → edited an already-applied migration
+  "SchemaManagementException"               → schema does not match entities
+
+
+================================================================================
+13. TESTING THE API (curl examples)
+================================================================================
+
+--- Send a GPS ping (bracelet) ---
+
+  curl -X POST http://localhost:8080/location \
+    -H "Content-Type: application/json" \
+    -H "X-Device-Key: dev-key-bracelet-001-secret" \
+    -d '{
+      "deviceId"  : "bracelet-001",
+      "lat"       : 42.6977,
+      "lng"       : 23.3219,
+      "timestamp" : "2026-03-25T10:30:00Z",
+      "accuracy"  : 5.2
+    }'
+
+  Expected: { "success": true, "message": "Location recorded", "data": { ... } }
+
+--- Trigger geofence breach (patient far from home) ---
+
+  curl -X POST http://localhost:8080/location \
+    -H "Content-Type: application/json" \
+    -H "X-Device-Key: dev-key-bracelet-001-secret" \
+    -d '{
+      "deviceId"  : "bracelet-001",
+      "lat"       : 43.2141,
+      "lng"       : 27.9147,
+      "timestamp" : "2026-03-25T11:00:00Z",
+      "accuracy"  : 8.0
+    }'
+
+  Expected: alert GEOFENCE_BREACH created; notification logged to console.
+
+--- Get location history ---
+
+  curl http://localhost:8080/location/1?limit=10
+
+--- Send a medication event ---
+
+  curl -X POST http://localhost:8080/medication \
+    -H "Content-Type: application/json" \
+    -H "X-Device-Key: dev-key-medbox-001-secret" \
+    -d '{
+      "deviceId"   : "medbox-001",
+      "compartment": 1,
+      "event"      : "DOSE_TAKEN",
+      "timestamp"  : "2026-03-25T08:01:00Z"
+    }'
+
+--- Send a missed dose event ---
+
+  curl -X POST http://localhost:8080/medication \
+    -H "Content-Type: application/json" \
+    -H "X-Device-Key: dev-key-medbox-001-secret" \
+    -d '{
+      "deviceId"   : "medbox-001",
+      "compartment": 2,
+      "event"      : "DOSE_MISSED",
+      "timestamp"  : "2026-03-25T20:30:00Z"
+    }'
+
+  Expected: MISSED_MEDICATION alert created; notification logged.
+
+--- Get medication history ---
+
+  curl http://localhost:8080/medication/1?limit=10
+
+--- Trigger a manual alert ---
+
+  curl -X POST http://localhost:8080/alerts \
+    -H "Content-Type: application/json" \
+    -d '{
+      "patientId" : 1,
+      "alertType" : "GEOFENCE_BREACH",
+      "severity"  : "HIGH",
+      "message"   : "Patient seen near bus station",
+      "timestamp" : "2026-03-25T11:00:00Z"
+    }'
+
+--- Get alert history ---
+
+  curl http://localhost:8080/alerts/1?limit=10
+
+--- Missing API key (expect 401) ---
+
+  curl -X POST http://localhost:8080/location \
+    -H "Content-Type: application/json" \
+    -d '{ "deviceId": "bracelet-001", "lat": 42.6977, "lng": 23.3219,
+          "timestamp": "2026-03-25T10:30:00Z" }'
+
+
+================================================================================
+14. SWAGGER UI
+================================================================================
+
+After the application starts, open a browser and navigate to:
+
+    http://localhost:8080/swagger-ui.html
+
+All endpoints are listed with their request/response schemas.
+You can send test requests directly from the browser.
+
+Raw OpenAPI JSON spec:
+    http://localhost:8080/api-docs
+
+
+================================================================================
+15. NOTIFICATION SERVICE (STUB)
+================================================================================
+
+File: src/main/java/com/azheimer/service/NotificationService.java
+
+The current implementation only logs to the console. To enable real
+notifications, replace the TODO sections:
+
+Firebase FCM (push notifications):
+  1. Add dependency: com.google.firebase:firebase-admin
+  2. Initialize FirebaseApp with service account credentials
+  3. Uncomment and fill in the Message builder in sendPush()
+
+Twilio (SMS):
+  1. Add dependency: com.twilio.sdk:twilio
+  2. Use Twilio.init(accountSid, authToken)
+  3. Implement sendSms() using Message.creator()
+
+SendGrid (email):
+  1. Add dependency: com.sendgrid:sendgrid-java
+  2. Implement sendEmail() using the SendGrid client
+  3. Uncomment the call in notify()
+
+All credentials must come from environment variables or application.properties,
+never hardcoded.
+
+
+================================================================================
+16. CONFIGURATION REFERENCE
+================================================================================
+
+application.properties key properties:
+
+  server.port                          HTTP port (default: 8080)
+
+  spring.datasource.url                JDBC URL — supports ${DB_HOST}, ${DB_PORT},
+                                       ${DB_NAME} env var overrides
+  spring.datasource.username           DB user (env: DB_USERNAME)
+  spring.datasource.password           DB password (env: DB_PASSWORD)
+
+  spring.jpa.hibernate.ddl-auto        "validate" — do NOT change to "create" or
+                                       "create-drop" in production
+
+  spring.flyway.enabled                true/false — disable for tests if needed
+  spring.flyway.baseline-on-migrate    false — set true only if you have an
+                                       existing schema without Flyway history
+
+  springdoc.swagger-ui.path            Swagger UI URL path (default: /swagger-ui.html)
+  springdoc.api-docs.path              OpenAPI JSON path (default: /api-docs)
+
+Override any property at runtime:
+  DB_HOST=myserver DB_NAME=prod_db mvn spring-boot:run
+  or via IntelliJ IDEA Run Configuration → Environment Variables
+
+
+================================================================================
+17. KNOWN LIMITATIONS & TODOs
+================================================================================
+
+  [ ] NotificationService — replace stubs with FCM, Twilio, SendGrid
+  [ ] GET endpoints have no authentication — add JWT/OAuth2 for mobile app
+  [ ] No alert resolve endpoint — add PATCH /alerts/{id}/resolve
+  [ ] No patient/caregiver management endpoints — add CRUD for admin use
+  [ ] No device registration endpoint — devices currently inserted via SQL/seed
+  [ ] Medication missed-dose detection is passive (box reports it) — add a
+      scheduled job (Spring @Scheduled) to detect missed doses by time window
+  [ ] PostGIS geofencing — upgrade to ST_DWithin native query when PostGIS
+      container is available (LocationHistoryRepository already has a placeholder)
+  [ ] No rate limiting — add Spring Security + bucket4j for device endpoints
+  [ ] No HTTPS — configure SSL or put behind a reverse proxy (nginx/Traefik)
+      for production deployment
+
+
+================================================================================
+  END OF DOCUMENT
+================================================================================
