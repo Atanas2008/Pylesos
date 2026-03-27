@@ -6,7 +6,8 @@
       "Bash(docker exec:*)",
       "Bash(wsl bash:*)",
       "Read(//mnt/c/Users/admin/**)",
-      "Bash(bash deploy.sh)"
+      "Bash(bash deploy.sh)",
+      "Bash(flutter pub:*)"
     ]
   }
 }
