@@ -139,6 +139,10 @@ void postLocation() {
   r = readSIM(2000);
   Serial.println("[POST] CONTENT: " + r);
 
+  sim800.println("AT+HTTPPARA=\"USERDATA\",\"X-Device-Key: " + String("dev-key-bracelet-001-secret") + "\"");
+  r = readSIM(2000);
+  Serial.println("[POST] X-Device-Key: " + r);
+
   sim800.println("AT+HTTPDATA=" + String(payload.length()) + ",10000");
   r = readSIM(5000);
   Serial.println("[POST] HTTPDATA: " + r);
