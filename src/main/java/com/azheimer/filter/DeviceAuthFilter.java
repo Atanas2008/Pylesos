@@ -86,7 +86,7 @@ public class DeviceAuthFilter extends OncePerRequestFilter {
     private void writeUnauthorized(HttpServletResponse response, String message) throws IOException {
         response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
         response.setContentType(MediaType.APPLICATION_JSON_VALUE);
-        Map<String, Object> body = Map.of("success", false, "message", message, "data", null);
+        Map<String, Object> body = Map.of("success", false, "message", message);
         response.getWriter().write(objectMapper.writeValueAsString(body));
     }
 }
