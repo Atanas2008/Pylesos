@@ -7,7 +7,7 @@
 HardwareSerial sim800(1);
 
 const char* APN        = "internet.a1.bg";
-const char* DEVICE_ID  = "THE_ONE";
+const char* DEVICE_ID  = "bracelet-001";
 const char* SERVER_URL = "http://ec2-16-16-142-88.eu-north-1.compute.amazonaws.com:8080/location";
 const int   SEND_EVERY = 15000;
 
@@ -57,12 +57,40 @@ bool openBearer() {
   return true;
 }
 
+
+String getTimestamp() {
+  sim800.println("AT+CCLK?");
+  String r = readSIM(2000);
+  Serial.println("[TIME] CCLK response: " + r);
+
+  // Response format: +CCLK: "26/03/27,19:52:33+08"
+  int start = r.indexOf("\"");
+  int end = r.indexOf("\"", start + 1);
+
+  if (start >= 0 && end > start) {
+    String time = r.substring(start + 1, end);
+    // Parse: YY/MM/DD,HH:MM:SS+TZ
+    // Convert to ISO8601: YYYY-MM-DDTHH:MM:SS.000Z
+
+    String yy = time.substring(0, 2);
+    String mm = time.substring(3, 5);
+    String dd = time.substring(6, 8);
+    String hh = time.substring(9, 11);
+    String mi = time.substring(12, 14);
+    String ss = time.substring(15, 17);
+
+    return "20" + yy + "-" + mm + "-" + dd + "T" + hh + ":" + mi + ":" + ss + ".000Z";
+  }
+
+  return "2026-03-27T19:52:33.000Z"; // Fallback
+}
+
 // ==================================================
 void postLocation() {
   float  lat      = 42.698334;
   float  lng      = 23.319941;
   float  accuracy = 5.0;
-  String timestamp = "2026-03-27T19:52:33.000Z";
+  String timestamp = getTimestamp();
 
   String payload = "{";
   payload += "\"deviceId\":\"" + String(DEVICE_ID) + "\",";
