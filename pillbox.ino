@@ -110,7 +110,7 @@ void sendMedicationEvent() {
   StaticJsonDocument<256> doc;
   doc["deviceId"] = DEVICE_ID;
   doc["compartment"] = 1;
-  doc["event"] = "TAKEN";
+  doc["event"] = "DOSE_TAKEN";
   doc["timestamp"] = ts;
 
   String body;
